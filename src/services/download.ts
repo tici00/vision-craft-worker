@@ -34,7 +34,9 @@ export async function downloadVideo(urlValue: string, destinationDir: string) {
     }
 
     let received = 0;
-    const source = Readable.fromWeb(response.body as globalThis.ReadableStream<Uint8Array>);
+    // Node's fetch exposes a Web ReadableStream whose TypeScript generic differs
+    // slightly from the Node stream definitions. The runtime conversion is safe.
+    const source = Readable.fromWeb(response.body as any);
     source.on("data", (chunk: Buffer) => {
       received += chunk.length;
       if (received > maxBytes) controller.abort();
