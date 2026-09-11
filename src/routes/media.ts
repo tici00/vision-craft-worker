@@ -5,6 +5,7 @@ import path from "node:path";
 import { v4 as uuid } from "uuid";
 import { requireWorkerToken } from "../services/auth.js";
 import { extractAudio, renderClip } from "../services/ffmpeg.js";
+import { createRenderJob, getRenderJob } from "../services/render-job.js";
 
 const router = Router();
 const tempDir = process.env.TEMP_DIR || "/tmp/vision-craft";
@@ -37,7 +38,6 @@ router.post("/extract-audio", requireWorkerToken, upload.single("video"), async 
 
     const id = uuid();
     const outputFile = path.join(outputDir, `${id}.mp3`);
-
     await extractAudio(req.file.path, outputFile);
 
     res.json({
@@ -53,6 +53,31 @@ router.post("/extract-audio", requireWorkerToken, upload.single("video"), async 
   } finally {
     await fs.unlink(req.file.path).catch(() => {});
   }
+});
+
+/**
+ * Novo fluxo assíncrono: recebe uma URL acessível pelo worker e baixa o vídeo
+ * uma única vez para o job. Mantemos /render-clips abaixo para compatibilidade.
+ */
+router.post("/render-jobs", requireWorkerToken, async (req, res) => {
+  try {
+    const { videoUrl, clips } = req.body || {};
+    const job = createRenderJob(videoUrl, clips, req.protocol, req.get("host") || "");
+    return res.status(202).json({ ok: true, jobId: job.id, job });
+  } catch (error) {
+    return res.status(400).json({
+      ok: false,
+      error: error instanceof Error ? error.message : "Falha ao criar job de renderização"
+    });
+  }
+});
+
+router.get("/render-jobs/:id", requireWorkerToken, (req, res) => {
+  const job = getRenderJob(req.params.id);
+  if (!job) {
+    return res.status(404).json({ ok: false, error: "Job não encontrado." });
+  }
+  return res.json({ ok: true, job });
 });
 
 router.post("/render-clips", requireWorkerToken, upload.single("video"), async (req, res) => {
@@ -73,8 +98,8 @@ router.post("/render-clips", requireWorkerToken, upload.single("video"), async (
   try {
     const outputDir = path.join(tempDir, "outputs");
     await fs.mkdir(outputDir, { recursive: true });
-
     const results = [];
+
     for (const [index, clip] of clips.entries()) {
       if (!(clip.end > clip.start) || clip.start < 0) {
         throw new Error(`Corte inválido na posição ${index}.`);
@@ -83,7 +108,6 @@ router.post("/render-clips", requireWorkerToken, upload.single("video"), async (
       const id = uuid();
       const outputFile = path.join(outputDir, `${id}.mp4`);
       await renderClip(req.file.path, outputFile, clip.start, clip.end);
-
       results.push({
         id,
         start: clip.start,
