@@ -1,18 +1,38 @@
 import { spawn } from "node:child_process";
 
-function run(command: string, args: string[]) {
-  return new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stderr = "";
+const FFMPEG_TIMEOUT_MS = Number(process.env.FFMPEG_TIMEOUT_MS || 30 * 60 * 1000);
+const MAX_STDERR_CHARS = 4000;
 
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+function tail(value: string, max = MAX_STDERR_CHARS) {
+  return value.length <= max ? value : value.slice(-max);
+}
+
+function run(command: string, args: string[], timeoutMs = FFMPEG_TIMEOUT_MS) {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    let settled = false;
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr = tail(stderr + chunk.toString());
     });
 
-    child.on("error", reject);
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(() => reject(new Error(`FFmpeg excedeu o tempo limite de ${Math.round(timeoutMs / 60000)} minutos.`)));
+    }, timeoutMs);
+
+    child.on("error", (error) => finish(() => reject(error)));
     child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`${command} falhou (código ${code}): ${stderr.slice(-1500)}`));
+      if (code === 0) finish(resolve);
+      else finish(() => reject(new Error(`${command} falhou (código ${code}): ${tail(stderr, 1500)}`)));
     });
   });
 }
@@ -54,7 +74,7 @@ export async function renderClip(input: string, output: string, start: number, e
     "-i", input,
     "-t", String(duration),
     "-c:v", "libx264",
-    "-preset", "medium",
+    "-preset", process.env.FFMPEG_PRESET || "medium",
     "-crf", "20",
     "-c:a", "aac",
     "-movflags", "+faststart",
