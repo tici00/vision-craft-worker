@@ -10,53 +10,36 @@ const DEFAULT_MAX_MB = Number(process.env.MAX_REMOTE_VIDEO_MB || 4096);
 
 function validateRemoteUrl(value: string) {
   let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new Error("A URL do vídeo é inválida.");
-  }
-
-  if (!["http:", "https:"].includes(url.protocol)) {
-    throw new Error("A URL do vídeo precisa usar HTTP ou HTTPS.");
-  }
-
+  try { url = new URL(value); } catch { throw new Error("A URL do vídeo é inválida."); }
+  if (!["http:", "https:"].includes(url.protocol)) throw new Error("A URL do vídeo precisa usar HTTP ou HTTPS.");
   return url;
 }
 
 export async function downloadVideo(urlValue: string, destinationDir: string) {
   const url = validateRemoteUrl(urlValue);
   await fsPromises.mkdir(destinationDir, { recursive: true });
-
   const destination = path.join(destinationDir, `${uuid()}-source`);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
 
   try {
-    const response = await fetch(url, {
-      signal: controller.signal,
-      redirect: "follow"
-    });
-
-    if (!response.ok || !response.body) {
-      throw new Error(`Falha ao baixar o vídeo (HTTP ${response.status}).`);
-    }
+    const response = await fetch(url, { signal: controller.signal, redirect: "follow" });
+    if (!response.ok || !response.body) throw new Error(`Falha ao baixar o vídeo (HTTP ${response.status}).`);
 
     const maxBytes = DEFAULT_MAX_MB * 1024 * 1024;
     const contentLengthHeader = response.headers.get("content-length");
     const contentLength = contentLengthHeader ? Number(contentLengthHeader) : 0;
-
     if (Number.isFinite(contentLength) && contentLength > maxBytes) {
       throw new Error(`O vídeo excede o limite remoto de ${DEFAULT_MAX_MB} MB.`);
     }
 
     let received = 0;
     const source = Readable.fromWeb(response.body as globalThis.ReadableStream<Uint8Array>);
-    const limitedSource = source.on("data", (chunk: Buffer) => {
+    source.on("data", (chunk: Buffer) => {
       received += chunk.length;
       if (received > maxBytes) controller.abort();
     });
-
-    await pipeline(limitedSource, fs.createWriteStream(destination));
+    await pipeline(source, fs.createWriteStream(destination));
     return destination;
   } catch (error) {
     await fsPromises.unlink(destination).catch(() => {});
