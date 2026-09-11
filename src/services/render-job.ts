@@ -24,6 +24,11 @@ type RenderJob = {
 const sourceUrls = new Map<string, string>();
 const tempDir = process.env.TEMP_DIR || '/tmp/vision-craft';
 
+// The worker is intentionally single-job at a time. FFmpeg is CPU-heavy and
+// running several long renders concurrently on a small instance causes severe
+// contention and makes otherwise healthy jobs appear stuck.
+let renderQueue = Promise.resolve();
+
 function publicMediaUrl(protocol: string, host: string, id: string) {
   return `${protocol}://${host}/media/${id}.mp4`;
 }
@@ -34,6 +39,12 @@ function updateProgress(job: RenderJob) {
   job.progress = job.total === 0 ? 100 : Math.round(((job.completed + job.failed) / job.total) * 100);
   job.updatedAt = new Date().toISOString();
   updateJob(job);
+}
+
+function enqueueRenderJob(job: RenderJob, videoUrl: string, protocol: string, host: string) {
+  renderQueue = renderQueue
+    .catch(() => {})
+    .then(() => processRenderJob(job, videoUrl, protocol, host));
 }
 
 export function getRenderJob(id: string) {
@@ -66,7 +77,8 @@ export function createRenderJob(videoUrl: string, clips: ClipInput[], protocol: 
 
   sourceUrls.set(id, videoUrl);
   saveJob(job);
-  void processRenderJob(job, videoUrl, protocol, host);
+  console.log(`[render-job] queued id=${id} clips=${clips.length}`);
+  enqueueRenderJob(job, videoUrl, protocol, host);
   return job;
 }
 
@@ -85,28 +97,34 @@ export function retryFailedClips(jobId: string, protocol: string, host: string) 
   job.error = undefined;
   job.status = 'queued';
   updateProgress(job);
-  void processRenderJob(job, videoUrl, protocol, host);
+  console.log(`[render-job] retry queued id=${jobId} clips=${failed.length}`);
+  enqueueRenderJob(job, videoUrl, protocol, host);
   return job;
 }
 
 async function processRenderJob(job: RenderJob, videoUrl: string, protocol: string, host: string) {
   const jobDir = path.join(tempDir, 'jobs', job.id);
   const outputDir = path.join(tempDir, 'outputs');
+  const startedAt = Date.now();
 
   try {
     await fs.mkdir(outputDir, { recursive: true });
     job.status = 'downloading';
     job.error = undefined;
     updateJob(job);
+    console.log(`[render-job] start id=${job.id} clips=${job.total}`);
+
     const sourceFile = await downloadVideo(videoUrl, jobDir);
 
     job.status = 'rendering';
     updateJob(job);
+    console.log(`[render-job] source-ready id=${job.id}`);
 
     for (const clip of job.clips) {
       if (clip.status === 'completed') continue;
       clip.status = 'rendering';
       updateJob(job);
+      console.log(`[render-job] clip-start job=${job.id} start=${clip.start.toFixed(3)} end=${clip.end.toFixed(3)}`);
 
       try {
         const outputId = uuid();
@@ -116,18 +134,22 @@ async function processRenderJob(job: RenderJob, videoUrl: string, protocol: stri
         clip.id = outputId;
         clip.url = publicMediaUrl(protocol, host, outputId);
         delete clip.error;
+        console.log(`[render-job] clip-complete job=${job.id} output=${outputId}`);
       } catch (error) {
         clip.status = 'failed';
         clip.error = error instanceof Error ? error.message : 'Falha ao renderizar o corte.';
+        console.error(`[render-job] clip-failed job=${job.id} error=${clip.error}`);
       }
       updateProgress(job);
     }
 
     job.status = job.failed === 0 ? 'completed' : job.completed > 0 ? 'partial' : 'failed';
     updateProgress(job);
+    console.log(`[render-job] finished id=${job.id} status=${job.status} completed=${job.completed} failed=${job.failed} elapsed=${Math.round((Date.now() - startedAt) / 1000)}s`);
   } catch (error) {
     job.status = 'failed';
     job.error = error instanceof Error ? error.message : 'Falha ao processar o job.';
+    console.error(`[render-job] failed id=${job.id} error=${job.error}`);
     job.clips.forEach((clip) => {
       if (clip.status === 'queued' || clip.status === 'rendering') {
         clip.status = 'failed';
