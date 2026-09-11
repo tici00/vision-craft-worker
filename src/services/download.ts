@@ -21,8 +21,10 @@ export async function downloadVideo(urlValue: string, destinationDir: string) {
   const destination = path.join(destinationDir, `${uuid()}-source`);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  const startedAt = Date.now();
 
   try {
+    console.log(`[download] start host=${url.host}`);
     const response = await fetch(url, { signal: controller.signal, redirect: "follow" });
     if (!response.ok || !response.body) throw new Error(`Falha ao baixar o vídeo (HTTP ${response.status}).`);
 
@@ -34,14 +36,25 @@ export async function downloadVideo(urlValue: string, destinationDir: string) {
     }
 
     let received = 0;
+    let lastProgressLog = 0;
     // Node's fetch exposes a Web ReadableStream whose TypeScript generic differs
     // slightly from the Node stream definitions. The runtime conversion is safe.
     const source = Readable.fromWeb(response.body as any);
     source.on("data", (chunk: Buffer) => {
       received += chunk.length;
+      const now = Date.now();
+      if (now - lastProgressLog >= 15000) {
+        lastProgressLog = now;
+        console.log(
+          `[download] progress received=${Math.round(received / 1_000_000)}MB elapsed=${Math.round((now - startedAt) / 1000)}s${
+            contentLength > 0 ? ` total=${Math.round(contentLength / 1_000_000)}MB` : ""
+          }`,
+        );
+      }
       if (received > maxBytes) controller.abort();
     });
     await pipeline(source, fs.createWriteStream(destination));
+    console.log(`[download] completed received=${Math.round(received / 1_000_000)}MB elapsed=${Math.round((Date.now() - startedAt) / 1000)}s`);
     return destination;
   } catch (error) {
     await fsPromises.unlink(destination).catch(() => {});
